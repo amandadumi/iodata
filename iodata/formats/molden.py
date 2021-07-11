@@ -112,7 +112,7 @@ def _load_low(lit: LineIterator) -> dict:
     title = None
 
     line = next(lit)
-    if line != '[Molden Format]\n':
+    if line.strip() != '[Molden Format]':
         lit.error('Molden header not found')
     # The order of sections, denoted by "[...]", is not fixed in the Molden
     # format, so we need a loop that checks for all possible sections at
@@ -348,8 +348,6 @@ def _is_normalized_properly(obasis: MolecularBasis, atcoords: np.ndarray,
     # every attempt because also the primitive normalization may differ in
     # different cases.
     olp = compute_overlap(obasis, atcoords)
-    print('checking normalization')
-    print(olp)
     # Convenient code for debugging files coming from crappy QC codes.
     # np.set_printoptions(linewidth=5000, precision=2, suppress=True, threshold=100000)
     # coeffs = orb_alpha._coeffs
@@ -385,20 +383,18 @@ def _fix_obasis_cfour(obasis: MolecularBasis) -> Union[MolecularBasis, None]:
     AO basis functions. The coefficients need to be divided by the returned
     correction factor.
     """
+    # TODO this function can probably be deleted unless h functions have a nonstandard ordering?
     cfour_conventions = {
-        # (0, 'c'): ['1'],
-        # (1, 'c'): ['x', 'y', 'z'],
+        (0, 'c'): ['1'],
+        (1, 'c'): ['x', 'y', 'z'],
         (2, 'p'): ['c0', 'c1', 's1', 'c2', 's2'],
         (2, 'c'): ['xx', 'yy', 'zz', 'xy', 'xz', 'yz'],
-        # (3, 'p'): ['c0', 'c1', 's1', 'c2', 's2', '-c3', '-s3'],
-        # (3, 'c'): ['xxx', 'yyy', 'zzz', 'xyy', 'xxy', 'xxz', 'xzz', 'yzz', 'yyz', 'xyz'],
-        # (4, 'p'): ['c0', 'c1', 's1', 'c2', 's2', '-c3', '-s3', '-c4', '-s4'],
-        # (4, 'c'): ['xxxx', 'yyyy', 'zzzz', 'xxxy', 'xxxz', 'xyyy', 'yyyz', 'xzzz',
-        #            'yzzz', 'xxyy', 'xxzz', 'yyzz', 'xxyz', 'xyyz', 'xyzz'],
-        # # H functions are not officialy supported by Molden, but this is how
-        # # ORCA writes Molden files anyway:
-        # (5, 'p'): ['c0', 'c1', 's1', 'c2', 's2', '-c3', '-s3', '-c4', '-s4', 'c5', 's5'],
+        (3, 'p'): ['c0', 'c1', 's1', 'c2', 's2', 'c3', 's3'],
+        (3, 'c'): ['xxx', 'yyy', 'zzz', 'xyy', 'xxy', 'xxz', 'xzz', 'yzz', 'yyz', 'xyz'],
+        (4, 'p'): ['c0', 'c1', 's1', 'c2', 's2', 'c3', 's3', 'c4', 's4'],
+        (4, 'c'): ['xxxx', 'yyyy', 'zzzz', 'xxxy', 'xxxz', 'xyyy', 'yyyz', 'xzzz', 'yzzz', 'xxyy', 'xxzz', 'yyzz', 'xxyz', 'xyyz', 'xyzz']
     }
+    # TODO h functions?
     fixed_shells = []
     corrected = False
     print('cfour parsing attempt')
@@ -412,13 +408,17 @@ def _fix_obasis_cfour(obasis: MolecularBasis) -> Union[MolecularBasis, None]:
         kind = shell.kinds[0]
         if kind == "c":
             for iprim, exponent in enumerate(shell.exponents):
+                correction = 1.0
+                if angmom == 0:
+                    correction = 1.0
+                if angmom == 1:
+                    correction = 1.0
                 if angmom == 2:
-                    correction = gob_cart_normalization(exponent, np.array([2, 0, 0]))
+                    correction = 1.0
                 elif angmom == 3:
-                    correction = gob_cart_normalization(exponent, np.array([1, 1, 1]))
+                    correction = 1.0
                 elif angmom == 4:
-                    correction = gob_cart_normalization(exponent, np.array([2, 1, 1]))
-                print(correction)
+                    correction = 1.0
                 if correction != 1.0:
                     fixed_shell.coeffs[iprim, 0] /= correction
         if kind == 'p':
@@ -431,7 +431,6 @@ def _fix_obasis_orca(obasis: MolecularBasis) -> MolecularBasis:
     Orca has different normalization conventions for the primitives and also
     different sign conventions for some of the pure functions.
     """
-    print('orca parsing attempt')
     orca_conventions = {
         (0, 'c'): ['1'],
         (1, 'c'): ['x', 'y', 'z'],
@@ -596,6 +595,39 @@ def _fix_mo_coeffs_psi4(obasis: MolecularBasis) -> Union[MolecularBasis, None]:
         return np.concatenate(correction)
     return None
 
+def _fix_mo_coeffs_cfour(obasis: MolecularBasis) -> Union[MolecularBasis, None]:
+    """Return correction values for the MO coefficients.
+
+    CFOUR (up to current 2.1) uses different normalization conventions for Cartesian
+    AO basis functions. The coefficients need to be divided by the returned
+    correction factor.
+    """
+
+    correction = []
+    corrected = False
+    for shell in obasis.shells:
+        # We can safely assume segmented shells.
+        assert shell.ncon == 1
+        angmom = shell.angmoms[0]
+        kind = shell.kinds[0]
+        factors = None
+        if kind == "c":
+            if angmom == 2:
+                factors = np.array([1.0/np.sqrt(3.0)] * 3 + [1.0] * 3)
+            elif angmom == 3:
+                factors = np.array([1.0/np.sqrt(15.0)] * 3 + [1.0/(np.sqrt(3.0))] * 6 + [1.0])
+            # TODO g and (?) h
+        if factors is None:
+            factors = np.ones(shell.nbasis)
+        else:
+            assert len(factors) == shell.nbasis
+            corrected = True
+        correction.append(factors)
+    if corrected:
+        return np.concatenate(correction)
+    return None
+
+
 
 
 def _fix_molden_from_buggy_codes(result: dict, lit: LineIterator):
@@ -658,7 +690,28 @@ def _fix_molden_from_buggy_codes(result: dict, lit: LineIterator):
         lit.warn('Corrected for CFOUR errors in Molden/MKL file.')
         result['obasis'] = cfour_obasis
         return
-
+    else:
+      cfour_coeff_correction = _fix_mo_coeffs_cfour(cfour_obasis)
+      print(cfour_coeff_correction)
+      if cfour_coeff_correction is not None:
+          coeffsa_cfour = coeffsa / cfour_coeff_correction[:, np.newaxis]
+          if coeffsb is None:
+              coeffsb_cfour = None
+          else:
+              coeffsb_cfour = coeffsb / cfour_coeff_correction[:, np.newaxis]
+          #if _is_normalized_properly(cfour_obasis, atcoords, coeffsa_cfour, coeffsb_cfour) or True:
+          if True:
+              lit.warn('Corrected for CFOUR 2.1 errors in Molden/MKL file.')
+              result['obasis'] = cfour_obasis
+              if result['mo'].kind == 'restricted':
+                  result['mo'].coeffs[:] = coeffsa_cfour
+              else:
+                  result['mo'].coeffsa[:] = coeffsa_cfour
+                  result['mo'].coeffsb[:] = coeffsb_cfour
+              return
+    #TODO REMOVE
+    result['obasis'] = cfour_obasis
+    return
     # --- Renormalized contractions
     normed_obasis = _fix_obasis_normalize_contractions(obasis)
     if _is_normalized_properly(normed_obasis, atcoords, coeffsa, coeffsb):
